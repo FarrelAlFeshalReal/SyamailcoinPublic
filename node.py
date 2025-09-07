@@ -6,8 +6,11 @@ import math
 from hashlib import sha224
 from flask import Flask, request, jsonify
 
+<<<<<<< HEAD
 print("FILE NODE YANG DIJALANKAN:", sys.argv[0])
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
 BLOCKRECURSIVE_FILE = "blockrecursive.jsonl"
 
 def exponomial_constant(i, gamma, R, tau, S_list, phi):
@@ -38,6 +41,7 @@ def validate_ml_dsa_threshold(F_value):
 def k9k1208uoc_control(tx_data):
     base_str = json.dumps(tx_data, sort_keys=True).encode()
     hash_val = sha224(base_str).hexdigest()
+<<<<<<< HEAD
 
     control_bits = []
     for i in range(0, len(hash_val), 4):
@@ -45,6 +49,9 @@ def k9k1208uoc_control(tx_data):
         control_bit = int(hex_chunk, 16) % 2
         control_bits.append(control_bit)
 
+=======
+    control_bits = [int(hash_val[i:i+4], 16) % 2 for i in range(0, len(hash_val), 4)]
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     return control_bits
 
 def append_blockrecursive(block):
@@ -97,7 +104,10 @@ app = Flask(__name__)
 def home():
     blocks = read_all_blockrecursive()
     acc_value = accumulation(blocks)
+<<<<<<< HEAD
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     return jsonify({
         "message": "SyamailCoin: Gödel's Untouched Money",
         "system": "Blockrecursive (NO Blockchain, NO Mining, NO Timestamp)",
@@ -122,23 +132,31 @@ def tx():
 
     base_str = json.dumps(tx_data, sort_keys=True).encode()
     base_hash = sha224(base_str).hexdigest()
+<<<<<<< HEAD
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     S_list = [(int(base_hash[k:k+4], 16) % 1000) / 100.0 for k in range(0, 40, 4)]
     i = len(S_list) - 1
 
     F_val = exponomial_constant(i, gamma=1.05, R=10, tau=0.5, S_list=S_list, phi=0.9)
 
     if not validate_ml_dsa_threshold(F_val):
+<<<<<<< HEAD
         return jsonify({
             "error": "Transaction rejected by ML-DSA Threshold (14.47%)",
             "F_value": F_val
         }), 400
+=======
+        return jsonify({"error": "Transaction rejected by ML-DSA Threshold (14.47%)", "F_value": F_val}), 400
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
 
     last_block = get_last_blockrecursive()
     prev_hash = last_block["recursive_hash"] if last_block else "genesis"
     index_val = (last_block["index"] + 1) if last_block else 0
 
     k9k_control = k9k1208uoc_control(tx_data)
+<<<<<<< HEAD
 
     n, r = len(S_list), min(5, len(S_list))
     delta_n, delta_r = index_val + 1, 1
@@ -153,6 +171,14 @@ def tx():
         "proof_exponomial": poe_value,
         "k9k_control": sum(k9k_control)
     }
+=======
+    n, r = len(S_list), min(5, len(S_list))
+    delta_n, delta_r = index_val + 1, 1
+    poe_value = proof_of_exponomial(n, r, delta_n, delta_r)
+    supply_time, stage = calculate_supply_reduction(index_val)
+
+    recursive_data = {"tx": tx_data, "F": F_val, "prev": prev_hash, "proof_exponomial": poe_value, "k9k_control": sum(k9k_control)}
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     recursive_blob = json.dumps(recursive_data, separators=(',', ':')).encode()
     recursive_hash = sha224(recursive_blob).hexdigest()
 
@@ -185,6 +211,7 @@ def tx():
 def get_blockrecursive():
     blocks = read_all_blockrecursive()
     acc_value = accumulation(blocks)
+<<<<<<< HEAD
 
     return jsonify({
         "blockrecursive": blocks,
@@ -192,12 +219,18 @@ def get_blockrecursive():
         "accumulation": acc_value,
         "system": "Blockrecursive (NOT Blockchain)"
     })
+=======
+    return jsonify({"blockrecursive": blocks, "count": len(blocks), "accumulation": acc_value, "system": "Blockrecursive (NOT Blockchain)"})
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
 
 @app.route("/status", methods=["GET"])
 def status():
     blocks = read_all_blockrecursive()
     last_block = get_last_blockrecursive()
+<<<<<<< HEAD
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     return jsonify({
         "exponomial_constant": "Active (replacing Timestamp Server)",
         "inevitability_server": "Active",
@@ -215,23 +248,31 @@ def status():
 def balance(address):
     blocks = read_all_blockrecursive()
     addr_balance = 0
+<<<<<<< HEAD
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     for block in blocks:
         tx = block.get("tx", {})
         if tx.get("to") == address:
             addr_balance += float(tx.get("amount", 0))
         if tx.get("from") == address:
             addr_balance -= float(tx.get("amount", 0))
+<<<<<<< HEAD
 
     return jsonify({
         "address": address,
         "balance": round(addr_balance, 15),
         "system": "Blockrecursive"
     })
+=======
+    return jsonify({"address": address, "balance": round(addr_balance, 15), "system": "Blockrecursive"})
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
 
 if __name__ == "__main__":
     if not os.path.exists(BLOCKRECURSIVE_FILE):
         open(BLOCKRECURSIVE_FILE, "a").close()
+<<<<<<< HEAD
         print(f"Created {BLOCKRECURSIVE_FILE} for Blockrecursive system")
 
     print("=== SyamailCoin: Gödel's Untouched Money ===")
@@ -244,4 +285,6 @@ if __name__ == "__main__":
     print(f"Blockrecursive file: {BLOCKRECURSIVE_FILE}")
     print("Starting Inevitability Server on http://0.0.0.0:5000")
 
+=======
+>>>>>>> 50bea74 (Update Node.py versi terbaru)
     app.run(host="0.0.0.0", port=5000, debug=False)

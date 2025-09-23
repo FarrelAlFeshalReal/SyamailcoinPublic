@@ -1,178 +1,302 @@
-import java.io.*;
-import java.net.*;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.net.InetSocketAddress;
+import java.security.SecureRandom;
 import java.util.*;
-import java.security.*;
-import com.google.gson.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
-public class Node {
+import org.java_websocket.WebSocket;
+import org.java_websocket.handshake.ClientHandshake;
+import org.java_websocket.handshake.ServerHandshake;
+import org.java_websocket.server.WebSocketServer;
+import org.java_websocket.client.WebSocketClient;
+
+public class Node extends WebSocketServer {
     private static final int PORT = 5000;
     private static final String BLOCK_FILE = "blockrecursive.jsonl";
-    private static final Gson gson = new Gson();
+    private static final double THRESHOLD = 0.1447; 
+    private static final SecureRandom random = new SecureRandom();
 
-    private static String sha224(String input) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-224");
-            byte[] hash = digest.digest(input.getBytes("UTF-8"));
-            StringBuilder hex = new StringBuilder();
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
+    private static class VirtualNAND {
+        private final ConcurrentHashMap<String, byte[]> storage = new ConcurrentHashMap<>();
+        private final ReentrantLock lock = new ReentrantLock();
+
+        void store(String key, byte[] data) {
+            lock.lock();
+            try {
+                byte[] balancedData = balanceBits(data);
+                if (!isValidNANDData(balancedData)) {
+                    throw new IllegalStateException("Invalid NAND data: DC Bias detected");
+                }
+                storage.put(key, balancedData);
+                System.out.println("NAND Store: Key=" + key + ", Data Size=" + balancedData.length + " bytes");
+            } finally {
+                lock.unlock();
             }
-            return hex.toString();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+        }
+
+        byte[] retrieve(String key) {
+            byte[] data = storage.getOrDefault(key, new byte[0]);
+            if (data.length > 0) {
+                System.out.println("NAND Retrieve: Key=" + key + ", Data Size=" + data.length + " bytes");
+            }
+            return data;
+        }
+
+        private byte[] balanceBits(byte[] data) {
+            byte[] result = new byte[data.length];
+            int oneCount = 0;
+            for (byte b : data) oneCount += Integer.bitCount(b & 0xFF);
+            double bias = (double) oneCount / (data.length * 8);
+            if (bias > 0.6 || bias < 0.4) {
+                for (int i = 0; i < data.length; i++) result[i] = (byte) (~data[i] & 0xFF);
+                System.out.println("NAND: Bit balancing applied to prevent DC Bias");
+            } else {
+                System.arraycopy(data, 0, result, 0, data.length);
+            }
+            return result;
+        }
+
+        private boolean isValidNANDData(byte[] data) {
+            int oneCount = 0;
+            for (byte b : data) oneCount += Integer.bitCount(b & 0xFF);
+            double bias = (double) oneCount / (data.length * 8);
+            boolean valid = Math.abs(bias - 0.5) < 0.1;
+            if (!valid) {
+                System.out.println("NAND Validation Failed: DC Bias detected (1s ratio=" + bias + ")");
+            }
+            return valid;
+        }
+
+        boolean verifyIntegrity(String key, byte[] originalData) {
+            byte[] stored = retrieve(key);
+            boolean valid = stored.length > 0 && Arrays.equals(balanceBits(originalData), stored);
+            if (!valid) {
+                System.out.println("NAND Integrity Check Failed: Possible malicious node detected");
+            }
+            return valid;
         }
     }
 
-    private static void appendBlock(Map<String, Object> block) {
-        try (FileWriter fw = new FileWriter(BLOCK_FILE, true)) {
-            fw.write(gson.toJson(block) + "\n");
-        } catch (IOException e) {
+    private static final VirtualNAND nandStorage = new VirtualNAND();
+    private static final List<WebSocket> peers = Collections.synchronizedList(new ArrayList<>());
+    private static final List<Block> blockrecursive = Collections.synchronizedList(new ArrayList<>());
+    private static final ReentrantLock blockrecursiveLock = new ReentrantLock();
+
+    public Node(int port) {
+        super(new InetSocketAddress(port));
+    }
+
+    private static class Block {
+        int index;
+        String recursiveHash, prevRecursiveHash, recipient, message;
+        BigDecimal amount;
+        double fValue, proofExponomial;
+        String mldsaSignature;
+        boolean isValid;
+
+        Block(int index, String recursiveHash, String prevRecursiveHash, String recipient,
+              BigDecimal amount, String message, double fValue, double proofExponomial, String mldsaSignature) {
+            this.index = index;
+            this.recursiveHash = recursiveHash;
+            this.prevRecursiveHash = prevRecursiveHash;
+            this.recipient = recipient;
+            this.amount = amount;
+            this.message = message;
+            this.fValue = fValue;
+            this.proofExponomial = proofExponomial;
+            this.mldsaSignature = mldsaSignature;
+            this.isValid = true;
+        }
+
+        String toJson() {
+            return String.format(
+                "{\"index\":%d,\"recursive_hash\":\"%s\",\"prev_recursive_hash\":\"%s\",\"recipient\":\"%s\",\"amount\":%s,\"message\":\"%s\",\"F\":%f,\"proof_exponomial\":%f,\"MLDSA\":\"%s\",\"valid\":%b}",
+                index, recursiveHash, prevRecursiveHash, recipient, amount.toPlainString(),
+                message, fValue, proofExponomial, mldsaSignature, isValid
+            );
+        }
+    }
+
+    private static String generateRecursiveHash(int blockIndex, BigDecimal amount, String prevHash, long timestamp, String contract) {
+        String input = blockIndex + amount.toString() + prevHash + timestamp + contract;
+        byte[] hashBytes = SAI288.sai288Hash(input.getBytes());
+        StringBuilder sb = new StringBuilder();
+        for (byte b : hashBytes) sb.append(String.format("%02x", b & 0xFF));
+        return sb.toString();
+    }
+
+    private static boolean validateContract(String contract) {
+        return contract != null && !contract.isEmpty() && contract.contains("agreement");
+    }
+
+    private static boolean verifyBlock(Block block, double proof) {
+        return proof >= THRESHOLD; 
+    }
+
+    private static void reverifyBlockrecursive() {
+        blockrecursiveLock.lock();
+        try {
+            for (int i = 0; i < blockrecursive.size(); i++) {
+                Block block = blockrecursive.get(i);
+                if (!block.isValid) {
+                    String newHash = generateRecursiveHash(block.index, block.amount, block.prevRecursiveHash, System.currentTimeMillis(), block.message);
+                    double newProof = SAI288.proofOfExponomial(
+                        Math.min(25, block.index + 10),
+                        Math.min(5, block.index / 2 + 1),
+                        Math.min(20, block.index + 5),
+                        Math.min(3, block.index / 3 + 1)
+                    );
+                    if (verifyBlock(block, newProof)) {
+                        block.recursiveHash = newHash;
+                        block.proofExponomial = newProof;
+                        block.isValid = true;
+                        for (int j = i + 1; j < blockrecursive.size(); j++) {
+                            Block next = blockrecursive.get(j);
+                            next.prevRecursiveHash = block.recursiveHash;
+                        }
+                    }
+                }
+            }
+        } finally {
+            blockrecursiveLock.unlock();
+        }
+    }
+
+    private static boolean broadcastAndVerifyConsensus(Block block) {
+        int agreeCount = 0;
+        synchronized (peers) {
+            for (WebSocket peer : peers) {
+                peer.send(block.toJson());
+                double peerProof = SAI288.proofOfExponomial(
+                    Math.min(25, block.index + 10),
+                    Math.min(5, block.index / 2 + 1),
+                    Math.min(20, block.index + 5),
+                    Math.min(3, block.index / 3 + 1)
+                );
+                if (peerProof >= THRESHOLD) agreeCount++; 
+            }
+        }
+        return (double) agreeCount / Math.max(1, peers.size()) >= THRESHOLD; 
+    }
+
+    private static void appendBlock(Block block) {
+        blockrecursiveLock.lock();
+        try {
+            byte[] blockData = block.toJson().getBytes();
+            nandStorage.store(block.recursiveHash, blockData);
+            if (!nandStorage.verifyIntegrity(block.recursiveHash, blockData)) {
+                System.out.println("NAND Integrity Check Failed - Malicious node detected, block rejected");
+                return;
+            }
+            blockrecursive.add(block);
+            try (FileWriter fw = new FileWriter(BLOCK_FILE, true)) {
+                fw.write(block.toJson() + "\n");
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } finally {
+            blockrecursiveLock.unlock();
+        }
+    }
+
+    @Override
+    public void onOpen(WebSocket conn, ClientHandshake handshake) {
+        synchronized (peers) {
+            peers.add(conn);
+            System.out.println("New peer connected: " + conn.getRemoteSocketAddress());
+        }
+    }
+
+    @Override
+    public void onClose(WebSocket conn, int code, String reason, boolean remote) {
+        synchronized (peers) {
+            peers.remove(conn);
+            System.out.println("Peer disconnected: " + conn.getRemoteSocketAddress());
+        }
+    }
+
+    @Override
+    public void onMessage(WebSocket conn, String message) {
+        try {
+            if (message.startsWith("{\"index\":")) {
+                String[] parts = message.split(",");
+                int index = Integer.parseInt(parts[0].split(":")[1]);
+                String recursiveHash = parts[1].split(":")[1].replaceAll("[\"}]", "");
+                String prevHash = parts[2].split(":")[1].replaceAll("[\"}]", "");
+                String recipient = parts[3].split(":")[1].replaceAll("[\"}]", "");
+                BigDecimal amount = new BigDecimal(parts[4].split(":")[1].replaceAll("[\"}]", ""));
+                String contract = parts[5].split(":")[1].replaceAll("[\"}]", "");
+                double fValue = Double.parseDouble(parts[6].split(":")[1].replaceAll("[\"}]", ""));
+                double proof = Double.parseDouble(parts[7].split(":")[1].replaceAll("[\"}]", ""));
+                String mldsa = parts[8].split(":")[1].replaceAll("[\"}]", "");
+
+                Block block = new Block(index, recursiveHash, prevHash, recipient, amount, contract, fValue, proof, mldsa);
+                if (verifyBlock(block, proof) && broadcastAndVerifyConsensus(block)) {
+                    appendBlock(block);
+                } else {
+                    block.isValid = false;
+                    appendBlock(block);
+                    System.out.println("Block " + index + " marked invalid: Possible malicious node detected");
+                }
+            }
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private static List<Map<String, Object>> readBlocks() {
-        List<Map<String, Object>> blocks = new ArrayList<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(BLOCK_FILE))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                blocks.add(gson.fromJson(line, Map.class));
-            }
-        } catch (IOException e) {
-            // file belum ada
-        }
-        return blocks;
+    @Override
+    public void onError(WebSocket conn, Exception ex) {
+        ex.printStackTrace();
     }
 
-    private static Map<String, Object> lastBlock() {
-        List<Map<String, Object>> blocks = readBlocks();
-        if (blocks.isEmpty()) return null;
-        return blocks.get(blocks.size() - 1);
-    }
-
-    private static double getBalance(String address) {
-        double balance = 0;
-        for (Map<String, Object> block : readBlocks()) {
-            Map tx = (Map) block.get("tx");
-            if (tx != null) {
-                if (address.equals(tx.get("to"))) {
-                    balance += Double.parseDouble(tx.get("amount").toString());
-                }
-                if (address.equals(tx.get("from"))) {
-                    balance -= Double.parseDouble(tx.get("amount").toString());
-                }
-            }
-        }
-        return balance;
-    }
-
-    private static void sendResponse(PrintWriter out, String body) {
-        out.println("HTTP/1.1 200 OK");
-        out.println("Content-Type: application/json");
-        out.println("Content-Length: " + body.length());
-        out.println();
-        out.println(body);
-    }
-
-    private static void send404(PrintWriter out) {
-        String body = "{\"error\": \"Not Found\"}";
-        out.println("HTTP/1.1 404 Not Found");
-        out.println("Content-Type: application/json");
-        out.println("Content-Length: " + body.length());
-        out.println();
-        out.println(body);
+    @Override
+    public void onStart() {
+        System.out.println("Node server started on port " + getPort());
     }
 
     public static void main(String[] args) {
-        System.out.println("=== Syamailcoin Node (Java Pure) ===");
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            while (true) {
-                try (Socket clientSocket = serverSocket.accept()) {
-                    BufferedReader in = new BufferedReader(
-                            new InputStreamReader(clientSocket.getInputStream()));
-                    PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true);
+        int[] ports = {5000, 5001, 5002, 5003, 5004};
+        List<Node> servers = new ArrayList<>();
 
-                    String requestLine = in.readLine();
-                    if (requestLine == null) continue;
+        for (int port : ports) {
+            Node server = new Node(port);
+            servers.add(server);
+            server.start();
 
-                    String[] parts = requestLine.split(" ");
-                    if (parts.length < 2) continue;
-                    String method = parts[0];
-                    String path = parts[1];
+            for (int p : ports) {
+                if (p != port) {
+                    try {
+                        final Node currentServer = server;
+                        WebSocketClient client = new WebSocketClient(new java.net.URI("ws://localhost:" + p)) {
+                            @Override
+                            public void onOpen(ServerHandshake handshake) {
+                                System.out.println("Connected to peer at port " + p);
+                            }
 
-                    String line;
-                    int contentLength = 0;
-                    while (!(line = in.readLine()).isEmpty()) {
-                        if (line.toLowerCase().startsWith("content-length:")) {
-                            contentLength = Integer.parseInt(line.split(":")[1].trim());
-                        }
-                    }
+                            @Override
+                            public void onMessage(String message) {
+                                currentServer.onMessage(this, message);
+                            }
 
-                    char[] bodyChars = new char[contentLength];
-                    if (contentLength > 0) {
-                        in.read(bodyChars);
-                    }
-                    String bodyData = new String(bodyChars);
+                            @Override
+                            public void onClose(int code, String reason, boolean remote) {
+                                System.out.println("Disconnected from peer at port " + p);
+                            }
 
-                    if (method.equals("GET") && path.equals("/")) {
-                        String body = gson.toJson(Map.of(
-                                "message", "SyamailCoin: Gödel's Untouched Money",
-                                "system", "Blockrecursive (NO Blockchain, NO Mining, NO Timestamp)",
-                                "status", "running"
-                        ));
-                        sendResponse(out, body);
-
-                    } else if (method.equals("GET") && path.equals("/status")) {
-                        List<Map<String, Object>> blocks = readBlocks();
-                        Map<String, Object> last = lastBlock();
-                        String body = gson.toJson(Map.of(
-                                "total_blocks", blocks.size(),
-                                "last_block", last
-                        ));
-                        sendResponse(out, body);
-
-                    } else if (method.equals("POST") && path.equals("/tx")) {
-                        Map<String, Object> tx = gson.fromJson(bodyData, Map.class);
-                        String txHash = sha224(bodyData);
-
-                        Map<String, Object> block = new LinkedHashMap<>();
-                        block.put("index", readBlocks().size());
-                        block.put("tx", tx);
-                        block.put("hash", txHash);
-                        block.put("prev_hash", lastBlock() == null ? "genesis" : lastBlock().get("hash"));
-
-                        appendBlock(block);
-
-                        String body = gson.toJson(Map.of(
-                                "status", "success",
-                                "block", block
-                        ));
-                        sendResponse(out, body);
-
-                    } else if (method.equals("GET") && path.startsWith("/balance/")) {
-                        String addr = path.replace("/balance/", "");
-                        double balance = getBalance(addr);
-                        String body = gson.toJson(Map.of(
-                                "address", addr,
-                                "balance", balance
-                        ));
-                        sendResponse(out, body);
-
-                    } else if (method.equals("GET") && path.equals("/blockrecursive")) {
-                        List<Map<String, Object>> blocks = readBlocks();
-                        String body = gson.toJson(Map.of(
-                                "blockrecursive", blocks,
-                                "count", blocks.size()
-                        ));
-                        sendResponse(out, body);
-
-                    } else {
-                        send404(out);
+                            @Override
+                            public void onError(Exception ex) {
+                                ex.printStackTrace();
+                            }
+                        };
+                        client.connect();
+                    } catch (Exception e) {
+                        e.printStackTrace();
                     }
                 }
             }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
-}
+    }

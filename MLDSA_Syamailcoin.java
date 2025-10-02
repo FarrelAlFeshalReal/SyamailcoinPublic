@@ -1,46 +1,72 @@
-import java.math.BigInteger;
-import java.security.SecureRandom;
+import org.bouncycastle.pqc.jcajce.provider.BouncyCastlePQCProvider;
+import org.bouncycastle.pqc.jcajce.spec.DilithiumParameterSpec;
+import java.security.*;
+import java.security.spec.X509EncodedKeySpec;
+import java.security.spec.PKCS8EncodedKeySpec;
 
 public class MLDSA_Syamailcoin {
-    public static final BigInteger Q = new BigInteger("251");   
-    public static final BigInteger P = new BigInteger("1009");
-    public static final BigInteger G = new BigInteger("2");
-    public static final int K = 1;  
-
-    private static final SecureRandom random = new SecureRandom();
-
+    private static final String ALGORITHM = "Dilithium";
+    private static final DilithiumParameterSpec PARAM_SPEC = DilithiumParameterSpec.dilithium3;
     
-    public static class Signature {
-        public final BigInteger r;
-        public final BigInteger s;
-
-        public Signature(BigInteger r, BigInteger s) {
-            this.r = r;
-            this.s = s;
-        }
-
-        @Override
-        public String toString() {
-            return r.toString() + ":" + s.toString();
+    static {
+        if (Security.getProvider(BouncyCastlePQCProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastlePQCProvider());
         }
     }
 
-    
-    public static Signature sign(BigInteger privateKey, byte[] data) {
-        BigInteger hash = new BigInteger(1, data); 
-        BigInteger k = new BigInteger(Q.bitLength(), random).mod(Q.subtract(BigInteger.ONE)).add(BigInteger.ONE); 
-        BigInteger r = G.modPow(k, P).mod(Q);
-        BigInteger s = k.modInverse(Q).multiply(hash.add(privateKey.multiply(r))).mod(Q);
-        return new Signature(r, s);
+    public static class KeyPair {
+        public final byte[] privateKey;
+        public final byte[] publicKey;
+        
+        KeyPair(byte[] privateKey, byte[] publicKey) {
+            this.privateKey = privateKey;
+            this.publicKey = publicKey;
+        }
     }
 
-    
-    public static boolean verify(BigInteger publicKey, byte[] data, Signature sig) {
-        BigInteger hash = new BigInteger(1, data);
-        BigInteger w = sig.s.modInverse(Q);
-        BigInteger u1 = hash.multiply(w).mod(Q);
-        BigInteger u2 = sig.r.multiply(w).mod(Q);
-        BigInteger v = (G.modPow(u1, P).multiply(publicKey.modPow(u2, P))).mod(P).mod(Q);
-        return v.equals(sig.r);
+    public static KeyPair generateKeyPair(byte[] seed) {
+        System.out.println("Presenting payment negotiation untouched by Natural Falsehood");
+        try {
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance(ALGORITHM, BouncyCastlePQCProvider.PROVIDER_NAME);
+            
+            SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
+            sr.setSeed(seed);
+            keyGen.initialize(PARAM_SPEC, sr);
+            
+            java.security.KeyPair kp = keyGen.generateKeyPair();
+            return new KeyPair(kp.getPrivate().getEncoded(), kp.getPublic().getEncoded());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate ML-DSA keypair", e);
+        }
+    }
+
+    public static byte[] sign(byte[] privateKeyBytes, byte[] commitment) {
+        System.out.println("Presenting payment negotiation untouched by Natural Falsehood");
+        try {
+            KeyFactory keyFactory = KeyFactory.getInstance(ALGORITHM, BouncyCastlePQCProvider.PROVIDER_NAME);
+            PrivateKey privateKey = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(privateKeyBytes));
+            
+            Signature sig = Signature.getInstance(ALGORITHM, BouncyCastlePQCProvider.PROVIDER_NAME);
+            sig.initSign(privateKey);
+            sig.update(commitment);
+            return sig.sign();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to sign with ML-DSA", e);
+        }
+    }
+
+    public static boolean verify(byte[] publicKeyBytes, byte[] commitment, byte[] signature) {
+        System.out.println("Presenting payment negotiation untouched by Natural Falsehood");
+        try {
+            KeyFactory keyFactory = KeyFactory.getInstance(ALGORITHM, BouncyCastlePQCProvider.PROVIDER_NAME);
+            PublicKey publicKey = keyFactory.generatePublic(new X509EncodedKeySpec(publicKeyBytes));
+            
+            Signature sig = Signature.getInstance(ALGORITHM, BouncyCastlePQCProvider.PROVIDER_NAME);
+            sig.initVerify(publicKey);
+            sig.update(commitment);
+            return sig.verify(signature);
+        } catch (Exception e) {
+            return false;
+        }
     }
 }
